@@ -897,16 +897,24 @@ func (c *Client) Do(req *retryablehttp.Request, v interface{}) (*Response, error
 		return nil, err
 	}
 
-	if resp.StatusCode == http.StatusUnauthorized && c.authType == BasicAuth {
+	// Read the response body into a buffer so it can be read multiple times
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
 		resp.Body.Close()
+		return nil, err
+	}
+	resp.Body.Close()
+
+	// Create a new ReadCloser that reads from our saved buffer
+	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+	if resp.StatusCode == http.StatusUnauthorized && c.authType == BasicAuth {
 		// The token most likely expired, so we need to request a new one and try again.
 		if _, err := c.requestOAuthToken(req.Context(), basicAuthToken); err != nil {
 			return nil, err
 		}
 		return c.Do(req, v)
 	}
-	defer resp.Body.Close()
-	defer io.Copy(io.Discard, resp.Body)
 
 	// If not yet configured, try to configure the rate limiter
 	// using the response headers we just received. Fail silently
@@ -914,6 +922,9 @@ func (c *Client) Do(req *retryablehttp.Request, v interface{}) (*Response, error
 	c.configureLimiterOnce.Do(func() { c.configureLimiter(req.Context(), resp.Header) })
 
 	response := newResponse(resp)
+
+	// Reset the body reader for error checking
+	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	err = CheckResponse(resp)
 	if err != nil {
@@ -923,6 +934,9 @@ func (c *Client) Do(req *retryablehttp.Request, v interface{}) (*Response, error
 	}
 
 	if v != nil {
+		// Reset the body reader again for JSON decoding
+		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
 		if w, ok := v.(io.Writer); ok {
 			_, err = io.Copy(w, resp.Body)
 		} else {
@@ -930,6 +944,7 @@ func (c *Client) Do(req *retryablehttp.Request, v interface{}) (*Response, error
 		}
 	}
 
+	// No need for defers anymore since we're managing the body explicitly
 	return response, err
 }
 
